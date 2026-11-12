@@ -41,6 +41,7 @@
 | 下一页 | `Space`、`PageDown`、`↓`、`→` |
 | 上一页 | `B`、`PageUp`、`↑`、`←` |
 | 增加/减少正文行数 | `+` / `-` |
+| 切换深色/浅色配色 | `T`；选择会自动保存 |
 | 切换上方工作视图 | `W` |
 | 手动刷新工作视图 | `R`；等待阅读时页面不会自动刷新 |
 | 全文搜索 | `/` 输入关键词；`N/P` 跳到下一个/上一个结果；`Esc` 清除搜索 |
@@ -95,7 +96,15 @@
 
 上半区默认显示所选 Codex session 的只读对话镜像；按 `W` 可在 `CODEX`、`ACTIVITY`、`GIT`、`PROCESS` 和 `LOG` 视图之间切换。等待阅读时页面不会自动刷新，翻页或按 `R` 时才会读取最新状态。`PROCESS` 会查找命令行中引用当前工作区的真实进程，并同时列出项目配置中的可用任务。
 
-终端区域使用接近 PowerShell/PSReadLine 的语义配色：提示符为绿色、命令名为黄色、参数为青色、字符串为紫色、路径为浅蓝色；Codex 标题、`USER` 和 `CODEX` 标签也会与正文分色。
+终端区域使用接近 PowerShell/PSReadLine 的语义配色：提示符为绿色、命令名为黄色、参数为青色、字符串为紫色、路径为浅蓝色；Codex 标题、`USER` 和 `CODEX` 标签也会与正文分色。按 `T` 可在深色和浅色配色间切换；浅色配色专为 Solarized Light 等浅背景设计，正文使用接近黑色的 `#002b36`，而不是低对比度灰色。选择会保存到 `%LOCALAPPDATA%\FishReader\settings.json`。
+
+也可以在启动时指定配色：
+
+```powershell
+.\mo-fish-reader.cmd "D:\小说\示例.txt" -ColorMode Light
+```
+
+`-ColorMode` 支持 `Auto`、`Dark` 和 `Light`。默认的 `Auto` 会恢复上次通过 `T` 选择的配色；显式传入 `Dark` 或 `Light` 只覆盖本次启动。
 
 在阅读中按 `S` 会打开最近 Codex 会话列表，显示更新时间、项目名和最近一条可见用户消息。用方向键选择、`Enter` 切换、`/` 搜索，或按 `P` 粘贴 UUID。阅读器会验证本地 session 是否存在；成功后立即打开新的 `CODEX` 视图，并将选择保存到 `%LOCALAPPDATA%\FishReader\settings.json`，下次启动继续使用。也可以使用可选启动参数 `-CodexSessionId <UUID>` 临时覆盖本次启动。
 

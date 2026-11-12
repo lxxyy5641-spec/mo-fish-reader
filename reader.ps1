@@ -32,6 +32,9 @@ param(
     [Alias('CodexSession')]
     [string]$CodexSessionId = '',
 
+    [ValidateSet('Auto', 'Dark', 'Light')]
+    [string]$ColorMode = 'Auto',
+
     [switch]$Preview
 )
 
@@ -39,22 +42,52 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:Escape = [char]27
-$script:Ansi = @{
-    Reset  = "$script:Escape[0m"
-    Green  = "$script:Escape[38;5;40m"
-    Gray   = "$script:Escape[38;5;250m"
-    Dim    = "$script:Escape[38;5;242m"
-    Cyan   = "$script:Escape[38;5;45m"
-    Yellow = "$script:Escape[38;5;214m"
-    White  = "$script:Escape[38;5;255m"
-    Blue   = "$script:Escape[38;5;75m"
-    Command = "$script:Escape[38;5;220m"
-    Parameter = "$script:Escape[38;5;81m"
-    String = "$script:Escape[38;5;213m"
-    Path = "$script:Escape[38;5;117m"
-    Search = "$script:Escape[30;48;5;220m"
-    SearchActive = "$script:Escape[30;48;5;45m"
+$script:Ansi = @{}
+$script:ActiveColorMode = 'Dark'
+
+function Set-ReaderColorMode {
+    param([Parameter(Mandatory)][ValidateSet('Dark', 'Light')][string]$Mode)
+
+    $script:ActiveColorMode = $Mode
+    if ($Mode -eq 'Light') {
+        # Solarized Light semantic palette. Base03 is a near-black body color.
+        $script:Ansi = @{
+            Reset        = "$script:Escape[0m"
+            Green        = "$script:Escape[38;2;92;124;0m"
+            Gray         = "$script:Escape[38;2;0;43;54m"
+            Dim          = "$script:Escape[38;2;88;110;117m"
+            Cyan         = "$script:Escape[38;2;42;161;152m"
+            Yellow       = "$script:Escape[38;2;181;137;0m"
+            White        = "$script:Escape[38;2;7;54;66m"
+            Blue         = "$script:Escape[38;2;38;139;210m"
+            Command      = "$script:Escape[38;2;181;137;0m"
+            Parameter    = "$script:Escape[38;2;38;139;210m"
+            String       = "$script:Escape[38;2;211;54;130m"
+            Path         = "$script:Escape[38;2;42;161;152m"
+            Search       = "$script:Escape[38;2;0;43;54;48;2;238;232;213m"
+            SearchActive = "$script:Escape[38;2;253;246;227;48;2;38;139;210m"
+        }
+        return
+    }
+
+    $script:Ansi = @{
+        Reset        = "$script:Escape[0m"
+        Green        = "$script:Escape[38;5;40m"
+        Gray         = "$script:Escape[38;5;250m"
+        Dim          = "$script:Escape[38;5;242m"
+        Cyan         = "$script:Escape[38;5;45m"
+        Yellow       = "$script:Escape[38;5;214m"
+        White        = "$script:Escape[38;5;255m"
+        Blue         = "$script:Escape[38;5;75m"
+        Command      = "$script:Escape[38;5;220m"
+        Parameter    = "$script:Escape[38;5;81m"
+        String       = "$script:Escape[38;5;213m"
+        Path         = "$script:Escape[38;5;117m"
+        Search       = "$script:Escape[30;48;5;220m"
+        SearchActive = "$script:Escape[30;48;5;45m"
+    }
 }
+Set-ReaderColorMode -Mode Dark
 $script:UnknownAuthor = -join ([char[]]@(0x672A, 0x77E5, 0x4F5C, 0x8005))
 
 if ([string]::IsNullOrWhiteSpace($StateFile)) {
@@ -94,6 +127,19 @@ if ([string]::IsNullOrWhiteSpace($SettingsFile)) {
 else {
     $script:SettingsPath = [IO.Path]::GetFullPath($SettingsFile)
 }
+
+$initialColorMode = if ($ColorMode -in @('Dark', 'Light')) { $ColorMode } else { 'Dark' }
+if ($ColorMode -eq 'Auto' -and (Test-Path -LiteralPath $script:SettingsPath -PathType Leaf)) {
+    try {
+        $savedSettings = Get-Content -LiteralPath $script:SettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $savedColorProperty = $savedSettings.PSObject.Properties['ColorMode']
+        if ($null -ne $savedColorProperty -and [string]$savedColorProperty.Value -in @('Dark', 'Light')) {
+            $initialColorMode = [string]$savedColorProperty.Value
+        }
+    }
+    catch { }
+}
+Set-ReaderColorMode -Mode $initialColorMode
 
 if ([string]::IsNullOrWhiteSpace($BookmarkFile)) {
     $bookmarkBase = [Environment]::GetFolderPath('LocalApplicationData')
@@ -312,6 +358,7 @@ function Get-ReaderShortcutRows {
         @{ Key = 'S'; Label = 'session' },
         @{ Key = 'W'; Label = 'view' },
         @{ Key = 'R'; Label = 'refresh' },
+        @{ Key = 'T'; Label = 'theme' },
         @{ Key = '+/-'; Label = 'lines' },
         @{ Key = 'Home/End'; Label = 'book' },
         @{ Key = 'L'; Label = 'shelf' },
@@ -1662,20 +1709,30 @@ function Get-SavedCodexSessionId {
     return $null
 }
 
-function Save-CodexSessionId {
-    param([Parameter(Mandatory)][string]$SessionId)
-
+function Save-ReaderSetting {
+    param(
+        [Parameter(Mandatory)][ValidateSet('CodexSessionId', 'ColorMode')][string]$Name,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value
+    )
     try {
         $directory = Split-Path -Parent $script:SettingsPath
         if (-not (Test-Path -LiteralPath $directory)) {
             [void](New-Item -ItemType Directory -Path $directory -Force)
         }
 
-        $payload = [pscustomobject]@{
-            Version        = 1
-            CodexSessionId = $SessionId
+        $values = [ordered]@{ Version = 1 }
+        if (Test-Path -LiteralPath $script:SettingsPath -PathType Leaf) {
+            try {
+                $existingSettings = Get-Content -LiteralPath $script:SettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                foreach ($property in @($existingSettings.PSObject.Properties)) {
+                    $values[$property.Name] = $property.Value
+                }
+            }
+            catch { }
         }
-        $json = $payload | ConvertTo-Json -Depth 3
+        $values['Version'] = 1
+        $values[$Name] = $Value
+        $json = ([pscustomobject]$values) | ConvertTo-Json -Depth 5
         $temporaryPath = "$($script:SettingsPath).tmp"
         [IO.File]::WriteAllText($temporaryPath, $json, [Text.UTF8Encoding]::new($false))
         Move-Item -LiteralPath $temporaryPath -Destination $script:SettingsPath -Force
@@ -1684,6 +1741,16 @@ function Save-CodexSessionId {
     catch {
         return $false
     }
+}
+
+function Save-CodexSessionId {
+    param([Parameter(Mandatory)][string]$SessionId)
+    return (Save-ReaderSetting -Name CodexSessionId -Value $SessionId)
+}
+
+function Save-ColorMode {
+    param([Parameter(Mandatory)][ValidateSet('Dark', 'Light')][string]$Mode)
+    return (Save-ReaderSetting -Name ColorMode -Value $Mode)
 }
 
 function Resolve-CodexSessionPath {
@@ -2845,6 +2912,15 @@ try {
                 $renderMode = 'Full'
             }
             'R' { $workTick++; $renderMode = 'Full' }
+            'T' {
+                $nextColorMode = if ($script:ActiveColorMode -eq 'Dark') { 'Light' } else { 'Dark' }
+                Set-ReaderColorMode -Mode $nextColorMode
+                if (-not (Save-ColorMode -Mode $nextColorMode)) {
+                    [Console]::WriteLine("$($script:Ansi.Yellow)Theme changed, but the saved setting could not be written.$($script:Ansi.Reset)")
+                    Start-Sleep -Milliseconds 900
+                }
+                $renderMode = 'Full'
+            }
             'S' {
                 $renderMode = 'Full'
                 $selectedCodexSessionId = Select-CodexSession
