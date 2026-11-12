@@ -4,6 +4,8 @@
 
 当前稳定版本：`v1.0.0`。
 
+![Mo Fish Reader terminal-style split view](docs/images/terminal-reader-demo.png)
+
 ## PowerShell 原生模式（推荐）
 
 不启动浏览器，也不使用 localhost。小说直接绘制在当前 PowerShell 或 Windows Terminal 窗口中：

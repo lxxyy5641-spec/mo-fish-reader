@@ -29,7 +29,7 @@ Alt+\`               快速隐藏或恢复桌面窗口
 
 const isTauri = Boolean(window.__TAURI_INTERNALS__);
 const text = ref(welcomeText);
-const fileName = ref("session-readme.txt");
+const fileName = ref("quick-start.txt");
 const encoding = ref<TextEncoding | "DEMO">("DEMO");
 const bookId = ref(makeBookId(fileName.value, text.value.length));
 const progress = ref(0);
@@ -302,7 +302,7 @@ onBeforeUnmount(() => {
     <header class="titlebar" data-tauri-drag-region>
       <div class="session-title" data-tauri-drag-region>
         <span class="terminal-mark">›_</span>
-        <span>workspace-console — {{ fileName }}</span>
+        <span>mo-fish-reader — {{ fileName }}</span>
       </div>
       <div class="window-actions">
         <button aria-label="最小化" @click="windowAction('minimize')">—</button>
