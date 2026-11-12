@@ -1,0 +1,16 @@
+node_modules/
+dist/
+src-tauri/target/
+*.log
+.DS_Store
+
+# Local reading library: keep the directory, never commit personal books.
+shelf/**
+!shelf/.gitkeep
+
+# Local design/reference output, not part of Fish Reader.
+desktop-icon-billiards/
+
+# Fish Reader local test/state artifacts.
+.tmp-*/
+*.tmp
