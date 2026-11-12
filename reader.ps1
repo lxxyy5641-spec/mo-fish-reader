@@ -2519,6 +2519,47 @@ function Show-ReaderScreen {
     [Console]::Write($buffer.ToString())
 }
 
+function Show-ReaderRegion {
+    param(
+        [Parameter(Mandatory)]$Book,
+        [Parameter(Mandatory)][AllowEmptyString()][string[]]$WrappedLines,
+        [Parameter(Mandatory)][int]$Page,
+        [Parameter(Mandatory)][int]$PageSize,
+        [Parameter(Mandatory)][int]$WorkRows,
+        [Parameter(Mandatory)][int]$Width,
+        [Parameter(Mandatory)][int]$WorkProfileIndex,
+        [AllowEmptyString()][string]$SearchQuery = '',
+        [int]$SearchIndex = -1,
+        [int]$SearchCount = 0,
+        [int]$SearchLine = -1
+    )
+
+    # The separator, prompt, divider, and shortcut rows are static during
+    # ordinary paging. Only replace the body rows and the changing status row.
+    $buffer = [Text.StringBuilder]::new()
+    $start = $Page * $PageSize
+    $firstBodyRow = $WorkRows + 3
+    for ($offset = 0; $offset -lt $PageSize; $offset++) {
+        $lineIndex = $start + $offset
+        $row = $firstBodyRow + $offset
+        if ($lineIndex -lt $WrappedLines.Count) {
+            $formatted = Format-ReaderTextLine -Text ([string]$WrappedLines[$lineIndex]) -SearchQuery $SearchQuery -ActiveMatch:($lineIndex -eq $SearchLine)
+            [void]$buffer.Append("$script:Escape[$row;1H$script:Escape[2K  $formatted")
+        }
+        else {
+            [void]$buffer.Append("$script:Escape[$row;1H$script:Escape[2K")
+        }
+    }
+
+    $pageCount = [Math]::Max(1, [Math]::Ceiling($WrappedLines.Count / [double]$PageSize))
+    $activeWorkView = @('ACTIVITY', 'GIT', 'PROCESS', 'LOG', 'CODEX')[[int]($WorkProfileIndex % 5)]
+    $searchStatus = if ($SearchCount -gt 0) { " | FIND $($SearchIndex + 1)/$SearchCount" } else { '' }
+    $status = " $($Book.Encoding) | PAGE $($Page + 1)/$pageCount | $activeWorkView$searchStatus "
+    $statusRow = $firstBodyRow + $PageSize + 1
+    [void]$buffer.Append("$script:Escape[$statusRow;1H$script:Escape[2K$($script:Ansi.Gray)$status$($script:Ansi.Reset)")
+    [Console]::Write($buffer.ToString())
+}
+
 function Request-NewPath {
     [Console]::Write("$script:Escape[2J$script:Escape[H$script:Escape[?25h")
     [Console]::Write("$($script:Ansi.Green)PS>$($script:Ansi.Reset) TXT path: ")
@@ -2576,6 +2617,10 @@ $searchQuery = ''
 $searchMatches = @()
 $searchIndex = -1
 $searchWidth = 0
+$renderMode = 'Full'
+$progressDirty = $false
+$progressDirtyAt = [DateTime]::MinValue
+$lastProgressSignature = ''
 
 try {
     [Console]::Title = 'Windows PowerShell'
@@ -2651,11 +2696,25 @@ try {
         $lastPageSize = $pageSize
 
         $activeSearchLine = if ($searchIndex -ge 0 -and $searchIndex -lt $searchMatches.Count) { [int]$searchMatches[$searchIndex] } else { -1 }
-        Show-ReaderScreen -Book $book -WrappedLines $wrappedLines -Page $page -PageSize $pageSize `
-            -WorkRows $workRows -Width $size.Width -ReaderLineCount $pageSize `
-            -WorkProfileIndex $workProfileIndex -WorkTick $workTick `
-            -WorkRoot $script:WorkRoot -WorkLog $script:WorkLog -PrivacyMode $privacyMode `
-            -SearchQuery $searchQuery -SearchIndex $searchIndex -SearchCount $searchMatches.Count -SearchLine $activeSearchLine
+        if ($renderMode -eq 'Reader') {
+            if (-not $privacyMode) {
+                Show-ReaderRegion -Book $book -WrappedLines $wrappedLines -Page $page -PageSize $pageSize `
+                    -WorkRows $workRows -Width $size.Width -WorkProfileIndex $workProfileIndex `
+                    -SearchQuery $searchQuery -SearchIndex $searchIndex -SearchCount $searchMatches.Count -SearchLine $activeSearchLine
+            }
+        }
+        elseif ($renderMode -eq 'Full') {
+            Show-ReaderScreen -Book $book -WrappedLines $wrappedLines -Page $page -PageSize $pageSize `
+                -WorkRows $workRows -Width $size.Width -ReaderLineCount $pageSize `
+                -WorkProfileIndex $workProfileIndex -WorkTick $workTick `
+                -WorkRoot $script:WorkRoot -WorkLog $script:WorkLog -PrivacyMode $privacyMode `
+                -SearchQuery $searchQuery -SearchIndex $searchIndex -SearchCount $searchMatches.Count -SearchLine $activeSearchLine
+        }
+        $renderMode = 'None'
+
+        if ([string]::IsNullOrWhiteSpace($lastProgressSignature) -and $wrappedLines.Count -gt 0) {
+            $lastProgressSignature = "$($book.Id)|$page|$pageSize|$textWidth"
+        }
 
         if ($Preview) {
             break
@@ -2664,7 +2723,11 @@ try {
         # Stay still while idle, but redraw when the console is actually resized.
         $resizeDetected = $false
         while (-not [Console]::KeyAvailable) {
-            Start-Sleep -Milliseconds 120
+            Start-Sleep -Milliseconds 40
+            if ($progressDirty -and (([DateTime]::UtcNow - $progressDirtyAt).TotalMilliseconds -ge 1000)) {
+                Save-BookProgress -Book $book -LineIndex ($page * $pageSize) -Width $textWidth -TotalLines $wrappedLines.Count -ReaderLineCount $pageSize
+                $progressDirty = $false
+            }
             $currentSize = Get-SafeConsoleSize
             if ($currentSize.Width -ne $size.Width -or $currentSize.Height -ne $size.Height) {
                 $resizeDetected = $true
@@ -2672,12 +2735,14 @@ try {
             }
         }
         if ($resizeDetected) {
+            $renderMode = 'Full'
             continue
         }
 
         $key = [Console]::ReadKey($true)
         $keyHandled = $false
         $keyCharacter = ([string]$key.KeyChar).ToUpperInvariant()
+        $renderMode = 'None'
 
         if ($key.KeyChar -eq '/') {
             $searchQuery = Request-BookSearch -CurrentQuery $searchQuery
@@ -2696,16 +2761,19 @@ try {
                 Start-Sleep -Milliseconds 900
             }
             $keyHandled = $true
+            $renderMode = 'Full'
         }
         elseif ($searchMatches.Count -gt 0 -and ($keyCharacter -eq 'N' -or $key.Key -eq [ConsoleKey]::N)) {
             $searchIndex = ($searchIndex + 1) % $searchMatches.Count
             $page = [Math]::Floor($searchMatches[$searchIndex] / [double]$pageSize)
             $keyHandled = $true
+            $renderMode = 'Reader'
         }
         elseif ($searchMatches.Count -gt 0 -and ($keyCharacter -eq 'P' -or $key.Key -eq [ConsoleKey]::P)) {
             $searchIndex = ($searchIndex - 1 + $searchMatches.Count) % $searchMatches.Count
             $page = [Math]::Floor($searchMatches[$searchIndex] / [double]$pageSize)
             $keyHandled = $true
+            $renderMode = 'Reader'
         }
         elseif ($key.KeyChar -eq '[') {
             if ($chapters.Count -gt 0) {
@@ -2715,6 +2783,7 @@ try {
                 $page = [Math]::Floor($chapters[$targetChapter].LineIndex / [double]$pageSize)
             }
             $keyHandled = $true
+            $renderMode = 'Reader'
         }
         elseif ($key.KeyChar -eq ']') {
             if ($chapters.Count -gt 0) {
@@ -2724,36 +2793,41 @@ try {
                 $page = [Math]::Floor($chapters[$targetChapter].LineIndex / [double]$pageSize)
             }
             $keyHandled = $true
+            $renderMode = 'Reader'
         }
 
         if (-not $keyHandled) {
             switch ($key.Key) {
-            'Spacebar'   { $page = [Math]::Min($pageCount - 1, $page + 1) }
-            'PageDown'   { $page = [Math]::Min($pageCount - 1, $page + 1) }
-            'DownArrow'  { $page = [Math]::Min($pageCount - 1, $page + 1) }
-            'RightArrow' { $page = [Math]::Min($pageCount - 1, $page + 1) }
-            'B'          { $page = [Math]::Max(0, $page - 1) }
-            'PageUp'     { $page = [Math]::Max(0, $page - 1) }
-            'UpArrow'    { $page = [Math]::Max(0, $page - 1) }
-            'LeftArrow'  { $page = [Math]::Max(0, $page - 1) }
+            'Spacebar'   { $page = [Math]::Min($pageCount - 1, $page + 1); $renderMode = 'Reader' }
+            'PageDown'   { $page = [Math]::Min($pageCount - 1, $page + 1); $renderMode = 'Reader' }
+            'DownArrow'  { $page = [Math]::Min($pageCount - 1, $page + 1); $renderMode = 'Reader' }
+            'RightArrow' { $page = [Math]::Min($pageCount - 1, $page + 1); $renderMode = 'Reader' }
+            'B'          { $page = [Math]::Max(0, $page - 1); $renderMode = 'Reader' }
+            'PageUp'     { $page = [Math]::Max(0, $page - 1); $renderMode = 'Reader' }
+            'UpArrow'    { $page = [Math]::Max(0, $page - 1); $renderMode = 'Reader' }
+            'LeftArrow'  { $page = [Math]::Max(0, $page - 1); $renderMode = 'Reader' }
             'Add' {
                 $pendingLineIndex = $page * $pageSize
                 $activeReaderLines = [Math]::Min(30, $activeReaderLines + 1)
+                $renderMode = 'Full'
             }
             'OemPlus' {
                 $pendingLineIndex = $page * $pageSize
                 $activeReaderLines = [Math]::Min(30, $activeReaderLines + 1)
+                $renderMode = 'Full'
             }
             'Subtract' {
                 $pendingLineIndex = $page * $pageSize
                 $activeReaderLines = [Math]::Max(3, $activeReaderLines - 1)
+                $renderMode = 'Full'
             }
             'OemMinus' {
                 $pendingLineIndex = $page * $pageSize
                 $activeReaderLines = [Math]::Max(3, $activeReaderLines - 1)
+                $renderMode = 'Full'
             }
-            'Home'       { $page = 0 }
-            'End'        { $page = $pageCount - 1 }
+            'Home'       { $page = 0; $renderMode = 'Reader' }
+            'End'        { $page = $pageCount - 1; $renderMode = 'Reader' }
             'Escape' {
                 if (-not [string]::IsNullOrWhiteSpace($searchQuery)) {
                     $searchQuery = ''
@@ -2763,13 +2837,16 @@ try {
                 else {
                     $privacyMode = -not $privacyMode
                 }
+                $renderMode = 'Full'
             }
             'W' {
                 $workProfileIndex = ($workProfileIndex + 1) % 5
                 $workTick = 0
+                $renderMode = 'Full'
             }
-            'R' { $workTick++ }
+            'R' { $workTick++; $renderMode = 'Full' }
             'S' {
+                $renderMode = 'Full'
                 $selectedCodexSessionId = Select-CodexSession
                 if (-not [string]::IsNullOrWhiteSpace($selectedCodexSessionId)) {
                     $script:CodexSessionId = $selectedCodexSessionId
@@ -2782,12 +2859,14 @@ try {
                 }
             }
             'K' {
+                $renderMode = 'Full'
                 $bookmarkTargetLine = Request-Bookmark -Book $book -CurrentLine ($page * $pageSize) -WrappedLines $wrappedLines -Chapters $chapters
                 if ($bookmarkTargetLine -ge 0) {
                     $page = [Math]::Floor($bookmarkTargetLine / [double]$pageSize)
                 }
             }
             'C' {
+                $renderMode = 'Full'
                 $visibleEndLine = [Math]::Min($wrappedLines.Count - 1, (($page + 1) * $pageSize) - 1)
                 $selectedChapter = Request-Chapter -Chapters $chapters -CurrentLine $visibleEndLine
                 if ($selectedChapter -ge 0) {
@@ -2795,7 +2874,9 @@ try {
                 }
             }
             'L' {
+                $renderMode = 'Full'
                 Save-BookProgress -Book $book -LineIndex ($page * $pageSize) -Width $textWidth -TotalLines $wrappedLines.Count -ReaderLineCount $pageSize
+                $progressDirty = $false
                 $selectedLibraryPath = Select-BookFromLibrary
                 [Console]::Write("$script:Escape[?25l")
                 if (-not [string]::IsNullOrWhiteSpace($selectedLibraryPath) -and
@@ -2820,6 +2901,7 @@ try {
                         $searchMatches = @()
                         $searchIndex = -1
                         $searchWidth = 0
+                        $lastProgressSignature = ''
                     }
                     catch {
                         [Console]::Write("`r`n$($script:Ansi.Yellow)$($_.Exception.Message)$($script:Ansi.Reset)")
@@ -2828,7 +2910,9 @@ try {
                 }
             }
             'O' {
+                $renderMode = 'Full'
                 Save-BookProgress -Book $book -LineIndex ($page * $pageSize) -Width $textWidth -TotalLines $wrappedLines.Count -ReaderLineCount $pageSize
+                $progressDirty = $false
                 $newPath = Request-NewPath
                 if (-not [string]::IsNullOrWhiteSpace($newPath)) {
                     try {
@@ -2851,6 +2935,7 @@ try {
                         $searchMatches = @()
                         $searchIndex = -1
                         $searchWidth = 0
+                        $lastProgressSignature = ''
                     }
                     catch {
                         [Console]::Write("`r`n$($script:Ansi.Yellow)$($_.Exception.Message)$($script:Ansi.Reset)")
@@ -2863,7 +2948,12 @@ try {
         }
 
         if ($wrappedLines.Count -gt 0) {
-            Save-BookProgress -Book $book -LineIndex ($page * $pageSize) -Width $textWidth -TotalLines $wrappedLines.Count -ReaderLineCount $pageSize
+            $progressSignature = "$($book.Id)|$page|$pageSize|$textWidth"
+            if (-not [string]::Equals($progressSignature, $lastProgressSignature, [StringComparison]::Ordinal)) {
+                $lastProgressSignature = $progressSignature
+                $progressDirty = $true
+                $progressDirtyAt = [DateTime]::UtcNow
+            }
         }
     }
 }
