@@ -42,6 +42,7 @@
 | 上一页 | `B`、`PageUp`、`↑`、`←` |
 | 增加/减少正文行数 | `+` / `-` |
 | 切换深色/浅色配色 | `T`；选择会自动保存 |
+| 调整正文间距 | `I`；在 `COMPACT`、`PARAGRAPH`、`RELAXED` 之间循环 |
 | 切换上方工作视图 | `W` |
 | 手动刷新工作视图 | `R`；等待阅读时页面不会自动刷新 |
 | 全文搜索 | `/` 输入关键词；`N/P` 跳到下一个/上一个结果；`Esc` 清除搜索 |
@@ -105,6 +106,14 @@
 ```
 
 `-ColorMode` 支持 `Auto`、`Dark` 和 `Light`。默认的 `Auto` 会恢复上次通过 `T` 选择的配色；显式传入 `Dark` 或 `Light` 只覆盖本次启动。
+
+按 `I` 可调整正文间距：`COMPACT` 保持原始行距，`PARAGRAPH` 在识别到的中文自然段之间留空，`RELAXED` 则在相邻正文行间留空。默认为 `PARAGRAPH`，当前档位会显示在状态栏并保存到设置文件。切换间距只改变显示布局，搜索、章节、书签和续读仍使用原文位置。也可在启动时指定：
+
+```powershell
+.\mo-fish-reader.cmd "D:\小说\示例.txt" -SpacingMode Compact
+```
+
+`-SpacingMode` 支持 `Auto`、`Compact`、`Paragraph` 和 `Relaxed`；`Auto` 会恢复上次通过 `I` 选择的档位。
 
 在阅读中按 `S` 会打开最近 Codex 会话列表，显示更新时间、项目名和最近一条可见用户消息。用方向键选择、`Enter` 切换、`/` 搜索，或按 `P` 粘贴 UUID。阅读器会验证本地 session 是否存在；成功后立即打开新的 `CODEX` 视图，并将选择保存到 `%LOCALAPPDATA%\FishReader\settings.json`，下次启动继续使用。也可以使用可选启动参数 `-CodexSessionId <UUID>` 临时覆盖本次启动。
 

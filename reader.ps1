@@ -35,6 +35,9 @@ param(
     [ValidateSet('Auto', 'Dark', 'Light')]
     [string]$ColorMode = 'Auto',
 
+    [ValidateSet('Auto', 'Compact', 'Paragraph', 'Relaxed')]
+    [string]$SpacingMode = 'Auto',
+
     [switch]$Preview
 )
 
@@ -44,6 +47,7 @@ $ErrorActionPreference = 'Stop'
 $script:Escape = [char]27
 $script:Ansi = @{}
 $script:ActiveColorMode = 'Dark'
+$script:ActiveSpacingMode = 'Paragraph'
 
 function Set-ReaderColorMode {
     param([Parameter(Mandatory)][ValidateSet('Dark', 'Light')][string]$Mode)
@@ -140,6 +144,19 @@ if ($ColorMode -eq 'Auto' -and (Test-Path -LiteralPath $script:SettingsPath -Pat
     catch { }
 }
 Set-ReaderColorMode -Mode $initialColorMode
+
+$initialSpacingMode = if ($SpacingMode -in @('Compact', 'Paragraph', 'Relaxed')) { $SpacingMode } else { 'Paragraph' }
+if ($SpacingMode -eq 'Auto' -and (Test-Path -LiteralPath $script:SettingsPath -PathType Leaf)) {
+    try {
+        $savedSettings = Get-Content -LiteralPath $script:SettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $savedSpacingProperty = $savedSettings.PSObject.Properties['SpacingMode']
+        if ($null -ne $savedSpacingProperty -and [string]$savedSpacingProperty.Value -in @('Compact', 'Paragraph', 'Relaxed')) {
+            $initialSpacingMode = [string]$savedSpacingProperty.Value
+        }
+    }
+    catch { }
+}
+$script:ActiveSpacingMode = $initialSpacingMode
 
 if ([string]::IsNullOrWhiteSpace($BookmarkFile)) {
     $bookmarkBase = [Environment]::GetFolderPath('LocalApplicationData')
@@ -359,6 +376,7 @@ function Get-ReaderShortcutRows {
         @{ Key = 'W'; Label = 'view' },
         @{ Key = 'R'; Label = 'refresh' },
         @{ Key = 'T'; Label = 'theme' },
+        @{ Key = 'I'; Label = 'spacing' },
         @{ Key = '+/-'; Label = 'lines' },
         @{ Key = 'Home/End'; Label = 'book' },
         @{ Key = 'L'; Label = 'shelf' },
@@ -414,6 +432,76 @@ function ConvertTo-WrappedLines {
     )
 
     return [FishReader.TextWrapper]::Wrap($Text, $Width)
+}
+
+function Test-ReaderParagraphStart {
+    param([AllowEmptyString()][string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    return $Text.StartsWith(([string][char]0x3000)) -or $Text.StartsWith('  ')
+}
+
+function New-ReaderDisplayLayout {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string[]]$WrappedLines,
+        [Parameter(Mandatory)][ValidateSet('Compact', 'Paragraph', 'Relaxed')][string]$Mode
+    )
+
+    $rows = [System.Collections.Generic.List[int]]::new()
+    $lineRows = [System.Collections.Generic.List[int]]::new()
+    for ($index = 0; $index -lt $WrappedLines.Count; $index++) {
+        $lineRows.Add($rows.Count)
+        $rows.Add($index)
+
+        if ($index -ge $WrappedLines.Count - 1) { continue }
+        $current = [string]$WrappedLines[$index]
+        $next = [string]$WrappedLines[$index + 1]
+        if ([string]::IsNullOrWhiteSpace($current) -or [string]::IsNullOrWhiteSpace($next)) { continue }
+
+        $addGap = $Mode -eq 'Relaxed' -or ($Mode -eq 'Paragraph' -and (Test-ReaderParagraphStart -Text $next))
+        if ($addGap) { $rows.Add(-1) }
+    }
+
+    return [pscustomobject]@{
+        Rows     = $rows.ToArray()
+        LineRows = $lineRows.ToArray()
+    }
+}
+
+function Get-DisplayPageForSourceLine {
+    param(
+        [Parameter(Mandatory)][int[]]$LineRows,
+        [Parameter(Mandatory)][int]$LineIndex,
+        [Parameter(Mandatory)][int]$PageSize
+    )
+
+    if ($LineRows.Count -eq 0) { return 0 }
+    $safeLineIndex = [Math]::Max(0, [Math]::Min($LineRows.Count - 1, $LineIndex))
+    return [Math]::Floor($LineRows[$safeLineIndex] / [double][Math]::Max(1, $PageSize))
+}
+
+function Get-PageSourceLine {
+    param(
+        [Parameter(Mandatory)][int[]]$DisplayRows,
+        [Parameter(Mandatory)][int]$Page,
+        [Parameter(Mandatory)][int]$PageSize,
+        [switch]$AtEnd
+    )
+
+    if ($DisplayRows.Count -eq 0) { return 0 }
+    $start = [Math]::Min($DisplayRows.Count - 1, [Math]::Max(0, $Page * $PageSize))
+    $end = [Math]::Min($DisplayRows.Count - 1, $start + [Math]::Max(1, $PageSize) - 1)
+    if ($AtEnd) {
+        for ($row = $end; $row -ge $start; $row--) {
+            if ($DisplayRows[$row] -ge 0) { return $DisplayRows[$row] }
+        }
+    }
+    else {
+        for ($row = $start; $row -le $end; $row++) {
+            if ($DisplayRows[$row] -ge 0) { return $DisplayRows[$row] }
+        }
+    }
+    return 0
 }
 
 function Get-LibraryEntryValue {
@@ -1711,7 +1799,7 @@ function Get-SavedCodexSessionId {
 
 function Save-ReaderSetting {
     param(
-        [Parameter(Mandatory)][ValidateSet('CodexSessionId', 'ColorMode')][string]$Name,
+        [Parameter(Mandatory)][ValidateSet('CodexSessionId', 'ColorMode', 'SpacingMode')][string]$Name,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Value
     )
     try {
@@ -1751,6 +1839,11 @@ function Save-CodexSessionId {
 function Save-ColorMode {
     param([Parameter(Mandatory)][ValidateSet('Dark', 'Light')][string]$Mode)
     return (Save-ReaderSetting -Name ColorMode -Value $Mode)
+}
+
+function Save-SpacingMode {
+    param([Parameter(Mandatory)][ValidateSet('Compact', 'Paragraph', 'Relaxed')][string]$Mode)
+    return (Save-ReaderSetting -Name SpacingMode -Value $Mode)
 }
 
 function Resolve-CodexSessionPath {
@@ -2514,6 +2607,7 @@ function Show-ReaderScreen {
     param(
         [Parameter(Mandatory)]$Book,
         [Parameter(Mandatory)][AllowEmptyString()][string[]]$WrappedLines,
+        [Parameter(Mandatory)][int[]]$DisplayRows,
         [Parameter(Mandatory)][int]$Page,
         [Parameter(Mandatory)][int]$PageSize,
         [Parameter(Mandatory)][int]$WorkRows,
@@ -2527,7 +2621,8 @@ function Show-ReaderScreen {
         [AllowEmptyString()][string]$SearchQuery = '',
         [int]$SearchIndex = -1,
         [int]$SearchCount = 0,
-        [int]$SearchLine = -1
+        [int]$SearchLine = -1,
+        [Parameter(Mandatory)][ValidateSet('Compact', 'Paragraph', 'Relaxed')][string]$SpacingMode
     )
 
     $buffer = [Text.StringBuilder]::new()
@@ -2556,8 +2651,9 @@ function Show-ReaderScreen {
 
         $start = $Page * $PageSize
         for ($offset = 0; $offset -lt $PageSize; $offset++) {
-            $lineIndex = $start + $offset
-            if ($lineIndex -lt $WrappedLines.Count) {
+            $displayIndex = $start + $offset
+            $lineIndex = if ($displayIndex -lt $DisplayRows.Count) { $DisplayRows[$displayIndex] } else { -1 }
+            if ($lineIndex -ge 0 -and $lineIndex -lt $WrappedLines.Count) {
                 [void]$buffer.Append('  ')
                 [void]$buffer.Append((Format-ReaderTextLine -Text ([string]$WrappedLines[$lineIndex]) -SearchQuery $SearchQuery -ActiveMatch:($lineIndex -eq $SearchLine)))
                 [void]$buffer.Append("`r`n")
@@ -2568,11 +2664,12 @@ function Show-ReaderScreen {
         }
     }
 
-    $pageCount = [Math]::Max(1, [Math]::Ceiling($WrappedLines.Count / [double]$PageSize))
+    $pageCount = [Math]::Max(1, [Math]::Ceiling($DisplayRows.Count / [double]$PageSize))
     $mode = if ($PrivacyMode) { 'FOCUS: OUTPUT' } else { "PAGE $($Page + 1)/$pageCount" }
     $activeWorkView = @('ACTIVITY', 'GIT', 'PROCESS', 'LOG', 'CODEX')[[int]($WorkProfileIndex % 5)]
     $searchStatus = if ($SearchCount -gt 0) { " | FIND $($SearchIndex + 1)/$SearchCount" } else { '' }
-    $status = " $($Book.Encoding) | $mode | $activeWorkView$searchStatus "
+    $spacingStatus = switch ($SpacingMode) { 'Compact' { 'COMPACT' }; 'Paragraph' { 'PARA' }; default { 'RELAXED' } }
+    $status = " $($Book.Encoding) | $mode | SPC $spacingStatus | $activeWorkView$searchStatus "
     $footerDivider = [string]::new([char]0x2500, [Math]::Max(10, $Width - 1))
     [void]$buffer.Append("$($script:Ansi.Dim)$footerDivider$($script:Ansi.Reset)`r`n")
     [void]$buffer.Append("$($script:Ansi.Gray)$status$($script:Ansi.Reset)`r`n")
@@ -2590,6 +2687,7 @@ function Show-ReaderRegion {
     param(
         [Parameter(Mandatory)]$Book,
         [Parameter(Mandatory)][AllowEmptyString()][string[]]$WrappedLines,
+        [Parameter(Mandatory)][int[]]$DisplayRows,
         [Parameter(Mandatory)][int]$Page,
         [Parameter(Mandatory)][int]$PageSize,
         [Parameter(Mandatory)][int]$WorkRows,
@@ -2598,7 +2696,8 @@ function Show-ReaderRegion {
         [AllowEmptyString()][string]$SearchQuery = '',
         [int]$SearchIndex = -1,
         [int]$SearchCount = 0,
-        [int]$SearchLine = -1
+        [int]$SearchLine = -1,
+        [Parameter(Mandatory)][ValidateSet('Compact', 'Paragraph', 'Relaxed')][string]$SpacingMode
     )
 
     # The separator, prompt, divider, and shortcut rows are static during
@@ -2607,9 +2706,10 @@ function Show-ReaderRegion {
     $start = $Page * $PageSize
     $firstBodyRow = $WorkRows + 3
     for ($offset = 0; $offset -lt $PageSize; $offset++) {
-        $lineIndex = $start + $offset
+        $displayIndex = $start + $offset
+        $lineIndex = if ($displayIndex -lt $DisplayRows.Count) { $DisplayRows[$displayIndex] } else { -1 }
         $row = $firstBodyRow + $offset
-        if ($lineIndex -lt $WrappedLines.Count) {
+        if ($lineIndex -ge 0 -and $lineIndex -lt $WrappedLines.Count) {
             $formatted = Format-ReaderTextLine -Text ([string]$WrappedLines[$lineIndex]) -SearchQuery $SearchQuery -ActiveMatch:($lineIndex -eq $SearchLine)
             [void]$buffer.Append("$script:Escape[$row;1H$script:Escape[2K  $formatted")
         }
@@ -2618,10 +2718,11 @@ function Show-ReaderRegion {
         }
     }
 
-    $pageCount = [Math]::Max(1, [Math]::Ceiling($WrappedLines.Count / [double]$PageSize))
+    $pageCount = [Math]::Max(1, [Math]::Ceiling($DisplayRows.Count / [double]$PageSize))
     $activeWorkView = @('ACTIVITY', 'GIT', 'PROCESS', 'LOG', 'CODEX')[[int]($WorkProfileIndex % 5)]
     $searchStatus = if ($SearchCount -gt 0) { " | FIND $($SearchIndex + 1)/$SearchCount" } else { '' }
-    $status = " $($Book.Encoding) | PAGE $($Page + 1)/$pageCount | $activeWorkView$searchStatus "
+    $spacingStatus = switch ($SpacingMode) { 'Compact' { 'COMPACT' }; 'Paragraph' { 'PARA' }; default { 'RELAXED' } }
+    $status = " $($Book.Encoding) | PAGE $($Page + 1)/$pageCount | SPC $spacingStatus | $activeWorkView$searchStatus "
     $statusRow = $firstBodyRow + $PageSize + 1
     [void]$buffer.Append("$script:Escape[$statusRow;1H$script:Escape[2K$($script:Ansi.Gray)$status$($script:Ansi.Reset)")
     [Console]::Write($buffer.ToString())
@@ -2674,6 +2775,10 @@ $quit = $false
 $originalTitle = [Console]::Title
 $cachedWidth = 0
 $wrappedLines = @()
+$displayRows = @()
+$lineRows = @()
+$displayLayoutWidth = 0
+$displayLayoutSpacing = ''
 $chapters = @()
 $initialPositionApplied = $false
 $pendingLineIndex = -1
@@ -2705,10 +2810,10 @@ try {
         $textWidth = [Math]::Max(30, $size.Width - 4)
 
         $layoutProgress = -1.0
-        $layoutChanged = $initialPositionApplied -and $wrappedLines.Count -gt 0 -and $lastPageSize -gt 0 -and
+        $layoutChanged = $initialPositionApplied -and $wrappedLines.Count -gt 0 -and $displayRows.Count -gt 0 -and $lastPageSize -gt 0 -and
             ($cachedWidth -ne $textWidth -or $lastPageSize -ne $pageSize)
         if ($layoutChanged -and $pendingLineIndex -lt 0) {
-            $oldLineIndex = [Math]::Min($wrappedLines.Count - 1, $page * $lastPageSize)
+            $oldLineIndex = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $lastPageSize
             $layoutProgress = $oldLineIndex / [double][Math]::Max(1, $wrappedLines.Count - 1)
         }
 
@@ -2719,8 +2824,16 @@ try {
             $cachedWidth = $textWidth
         }
 
+        if ($displayLayoutWidth -ne $textWidth -or $displayLayoutSpacing -ne $script:ActiveSpacingMode -or $displayRows.Count -eq 0) {
+            $displayLayout = New-ReaderDisplayLayout -WrappedLines $wrappedLines -Mode $script:ActiveSpacingMode
+            $displayRows = @($displayLayout.Rows)
+            $lineRows = @($displayLayout.LineRows)
+            $displayLayoutWidth = $textWidth
+            $displayLayoutSpacing = $script:ActiveSpacingMode
+        }
+
         if (-not [string]::IsNullOrWhiteSpace($searchQuery) -and $searchWidth -ne $textWidth) {
-            $currentSearchLine = [Math]::Min($wrappedLines.Count - 1, $page * [Math]::Max(1, $lastPageSize))
+            $currentSearchLine = [Math]::Min($wrappedLines.Count - 1, (Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize ([Math]::Max(1, $lastPageSize))))
             $searchMatches = @(Find-BookSearchMatches -WrappedLines $wrappedLines -Query $searchQuery)
             $searchIndex = 0
             for ($matchIndex = 0; $matchIndex -lt $searchMatches.Count; $matchIndex++) {
@@ -2731,18 +2844,18 @@ try {
 
         if ($layoutProgress -ge 0 -and $wrappedLines.Count -gt 0) {
             $resizedTargetLine = [Math]::Floor($layoutProgress * [Math]::Max(0, $wrappedLines.Count - 1))
-            $page = [Math]::Floor($resizedTargetLine / [double]$pageSize)
+            $page = Get-DisplayPageForSourceLine -LineRows $lineRows -LineIndex $resizedTargetLine -PageSize $pageSize
         }
-        $pageCount = [Math]::Max(1, [Math]::Ceiling($wrappedLines.Count / [double]$pageSize))
+        $pageCount = [Math]::Max(1, [Math]::Ceiling($displayRows.Count / [double]$pageSize))
 
         if ($pendingLineIndex -ge 0) {
-            $page = [Math]::Floor($pendingLineIndex / [double]$pageSize)
+            $page = Get-DisplayPageForSourceLine -LineRows $lineRows -LineIndex $pendingLineIndex -PageSize $pageSize
             $pendingLineIndex = -1
         }
 
         if (-not $initialPositionApplied) {
             if ($Chapter -gt 0 -and $Chapter -le $chapters.Count) {
-                $page = [Math]::Floor($chapters[$Chapter - 1].LineIndex / [double]$pageSize)
+                $page = Get-DisplayPageForSourceLine -LineRows $lineRows -LineIndex $chapters[$Chapter - 1].LineIndex -PageSize $pageSize
             }
             elseif ($Chapter -eq 0) {
                 $savedProgress = Get-BookProgress -Book $book
@@ -2753,7 +2866,7 @@ try {
                     else {
                         $targetLine = [Math]::Floor([double]$savedProgress.Progress * [Math]::Max(0, $wrappedLines.Count - 1))
                     }
-                    $page = [Math]::Floor($targetLine / [double]$pageSize)
+                    $page = Get-DisplayPageForSourceLine -LineRows $lineRows -LineIndex $targetLine -PageSize $pageSize
                 }
             }
             $initialPositionApplied = $true
@@ -2765,22 +2878,25 @@ try {
         $activeSearchLine = if ($searchIndex -ge 0 -and $searchIndex -lt $searchMatches.Count) { [int]$searchMatches[$searchIndex] } else { -1 }
         if ($renderMode -eq 'Reader') {
             if (-not $privacyMode) {
-                Show-ReaderRegion -Book $book -WrappedLines $wrappedLines -Page $page -PageSize $pageSize `
+                Show-ReaderRegion -Book $book -WrappedLines $wrappedLines -DisplayRows $displayRows -Page $page -PageSize $pageSize `
                     -WorkRows $workRows -Width $size.Width -WorkProfileIndex $workProfileIndex `
-                    -SearchQuery $searchQuery -SearchIndex $searchIndex -SearchCount $searchMatches.Count -SearchLine $activeSearchLine
+                    -SearchQuery $searchQuery -SearchIndex $searchIndex -SearchCount $searchMatches.Count -SearchLine $activeSearchLine `
+                    -SpacingMode $script:ActiveSpacingMode
             }
         }
         elseif ($renderMode -eq 'Full') {
-            Show-ReaderScreen -Book $book -WrappedLines $wrappedLines -Page $page -PageSize $pageSize `
+            Show-ReaderScreen -Book $book -WrappedLines $wrappedLines -DisplayRows $displayRows -Page $page -PageSize $pageSize `
                 -WorkRows $workRows -Width $size.Width -ReaderLineCount $pageSize `
                 -WorkProfileIndex $workProfileIndex -WorkTick $workTick `
                 -WorkRoot $script:WorkRoot -WorkLog $script:WorkLog -PrivacyMode $privacyMode `
-                -SearchQuery $searchQuery -SearchIndex $searchIndex -SearchCount $searchMatches.Count -SearchLine $activeSearchLine
+                -SearchQuery $searchQuery -SearchIndex $searchIndex -SearchCount $searchMatches.Count -SearchLine $activeSearchLine `
+                -SpacingMode $script:ActiveSpacingMode
         }
         $renderMode = 'None'
 
         if ([string]::IsNullOrWhiteSpace($lastProgressSignature) -and $wrappedLines.Count -gt 0) {
-            $lastProgressSignature = "$($book.Id)|$page|$pageSize|$textWidth"
+            $signatureLine = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
+            $lastProgressSignature = "$($book.Id)|$signatureLine|$pageSize|$textWidth"
         }
 
         if ($Preview) {
@@ -2792,7 +2908,8 @@ try {
         while (-not [Console]::KeyAvailable) {
             Start-Sleep -Milliseconds 40
             if ($progressDirty -and (([DateTime]::UtcNow - $progressDirtyAt).TotalMilliseconds -ge 1000)) {
-                Save-BookProgress -Book $book -LineIndex ($page * $pageSize) -Width $textWidth -TotalLines $wrappedLines.Count -ReaderLineCount $pageSize
+                $progressLine = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
+                Save-BookProgress -Book $book -LineIndex $progressLine -Width $textWidth -TotalLines $wrappedLines.Count -ReaderLineCount $pageSize
                 $progressDirty = $false
             }
             $currentSize = Get-SafeConsoleSize
@@ -2817,11 +2934,11 @@ try {
             $searchIndex = if ($searchMatches.Count -gt 0) { 0 } else { -1 }
             $searchWidth = $textWidth
             if ($searchMatches.Count -gt 0) {
-                $currentLine = $page * $pageSize
+                $currentLine = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
                 for ($matchIndex = 0; $matchIndex -lt $searchMatches.Count; $matchIndex++) {
                     if ($searchMatches[$matchIndex] -ge $currentLine) { $searchIndex = $matchIndex; break }
                 }
-                $page = [Math]::Floor($searchMatches[$searchIndex] / [double]$pageSize)
+                $page = Get-DisplayPageForSourceLine -LineRows $lineRows -LineIndex $searchMatches[$searchIndex] -PageSize $pageSize
             }
             elseif (-not [string]::IsNullOrWhiteSpace($searchQuery)) {
                 [Console]::Write("`r`n$($script:Ansi.Yellow)No matches: $searchQuery$($script:Ansi.Reset)")
@@ -2832,32 +2949,32 @@ try {
         }
         elseif ($searchMatches.Count -gt 0 -and ($keyCharacter -eq 'N' -or $key.Key -eq [ConsoleKey]::N)) {
             $searchIndex = ($searchIndex + 1) % $searchMatches.Count
-            $page = [Math]::Floor($searchMatches[$searchIndex] / [double]$pageSize)
+            $page = Get-DisplayPageForSourceLine -LineRows $lineRows -LineIndex $searchMatches[$searchIndex] -PageSize $pageSize
             $keyHandled = $true
             $renderMode = 'Reader'
         }
         elseif ($searchMatches.Count -gt 0 -and ($keyCharacter -eq 'P' -or $key.Key -eq [ConsoleKey]::P)) {
             $searchIndex = ($searchIndex - 1 + $searchMatches.Count) % $searchMatches.Count
-            $page = [Math]::Floor($searchMatches[$searchIndex] / [double]$pageSize)
+            $page = Get-DisplayPageForSourceLine -LineRows $lineRows -LineIndex $searchMatches[$searchIndex] -PageSize $pageSize
             $keyHandled = $true
             $renderMode = 'Reader'
         }
         elseif ($key.KeyChar -eq '[') {
             if ($chapters.Count -gt 0) {
-                $visibleEndLine = [Math]::Min($wrappedLines.Count - 1, (($page + 1) * $pageSize) - 1)
+                $visibleEndLine = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize -AtEnd
                 $currentChapter = Get-CurrentChapterIndex -Chapters $chapters -CurrentLine $visibleEndLine
                 $targetChapter = [Math]::Max(0, $currentChapter - 1)
-                $page = [Math]::Floor($chapters[$targetChapter].LineIndex / [double]$pageSize)
+                $page = Get-DisplayPageForSourceLine -LineRows $lineRows -LineIndex $chapters[$targetChapter].LineIndex -PageSize $pageSize
             }
             $keyHandled = $true
             $renderMode = 'Reader'
         }
         elseif ($key.KeyChar -eq ']') {
             if ($chapters.Count -gt 0) {
-                $visibleEndLine = [Math]::Min($wrappedLines.Count - 1, (($page + 1) * $pageSize) - 1)
+                $visibleEndLine = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize -AtEnd
                 $currentChapter = Get-CurrentChapterIndex -Chapters $chapters -CurrentLine $visibleEndLine
                 $targetChapter = [Math]::Min($chapters.Count - 1, $currentChapter + 1)
-                $page = [Math]::Floor($chapters[$targetChapter].LineIndex / [double]$pageSize)
+                $page = Get-DisplayPageForSourceLine -LineRows $lineRows -LineIndex $chapters[$targetChapter].LineIndex -PageSize $pageSize
             }
             $keyHandled = $true
             $renderMode = 'Reader'
@@ -2874,22 +2991,22 @@ try {
             'UpArrow'    { $page = [Math]::Max(0, $page - 1); $renderMode = 'Reader' }
             'LeftArrow'  { $page = [Math]::Max(0, $page - 1); $renderMode = 'Reader' }
             'Add' {
-                $pendingLineIndex = $page * $pageSize
+                $pendingLineIndex = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
                 $activeReaderLines = [Math]::Min(30, $activeReaderLines + 1)
                 $renderMode = 'Full'
             }
             'OemPlus' {
-                $pendingLineIndex = $page * $pageSize
+                $pendingLineIndex = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
                 $activeReaderLines = [Math]::Min(30, $activeReaderLines + 1)
                 $renderMode = 'Full'
             }
             'Subtract' {
-                $pendingLineIndex = $page * $pageSize
+                $pendingLineIndex = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
                 $activeReaderLines = [Math]::Max(3, $activeReaderLines - 1)
                 $renderMode = 'Full'
             }
             'OemMinus' {
-                $pendingLineIndex = $page * $pageSize
+                $pendingLineIndex = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
                 $activeReaderLines = [Math]::Max(3, $activeReaderLines - 1)
                 $renderMode = 'Full'
             }
@@ -2921,6 +3038,21 @@ try {
                 }
                 $renderMode = 'Full'
             }
+            'I' {
+                $pendingLineIndex = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
+                $nextSpacingMode = switch ($script:ActiveSpacingMode) {
+                    'Compact' { 'Paragraph' }
+                    'Paragraph' { 'Relaxed' }
+                    default { 'Compact' }
+                }
+                $script:ActiveSpacingMode = $nextSpacingMode
+                $displayLayoutSpacing = ''
+                if (-not (Save-SpacingMode -Mode $nextSpacingMode)) {
+                    [Console]::WriteLine("$($script:Ansi.Yellow)Spacing changed, but the saved setting could not be written.$($script:Ansi.Reset)")
+                    Start-Sleep -Milliseconds 900
+                }
+                $renderMode = 'Full'
+            }
             'S' {
                 $renderMode = 'Full'
                 $selectedCodexSessionId = Select-CodexSession
@@ -2936,22 +3068,24 @@ try {
             }
             'K' {
                 $renderMode = 'Full'
-                $bookmarkTargetLine = Request-Bookmark -Book $book -CurrentLine ($page * $pageSize) -WrappedLines $wrappedLines -Chapters $chapters
+                $currentLine = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
+                $bookmarkTargetLine = Request-Bookmark -Book $book -CurrentLine $currentLine -WrappedLines $wrappedLines -Chapters $chapters
                 if ($bookmarkTargetLine -ge 0) {
-                    $page = [Math]::Floor($bookmarkTargetLine / [double]$pageSize)
+                    $page = Get-DisplayPageForSourceLine -LineRows $lineRows -LineIndex $bookmarkTargetLine -PageSize $pageSize
                 }
             }
             'C' {
                 $renderMode = 'Full'
-                $visibleEndLine = [Math]::Min($wrappedLines.Count - 1, (($page + 1) * $pageSize) - 1)
+                $visibleEndLine = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize -AtEnd
                 $selectedChapter = Request-Chapter -Chapters $chapters -CurrentLine $visibleEndLine
                 if ($selectedChapter -ge 0) {
-                    $page = [Math]::Floor($chapters[$selectedChapter].LineIndex / [double]$pageSize)
+                    $page = Get-DisplayPageForSourceLine -LineRows $lineRows -LineIndex $chapters[$selectedChapter].LineIndex -PageSize $pageSize
                 }
             }
             'L' {
                 $renderMode = 'Full'
-                Save-BookProgress -Book $book -LineIndex ($page * $pageSize) -Width $textWidth -TotalLines $wrappedLines.Count -ReaderLineCount $pageSize
+                $progressLine = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
+                Save-BookProgress -Book $book -LineIndex $progressLine -Width $textWidth -TotalLines $wrappedLines.Count -ReaderLineCount $pageSize
                 $progressDirty = $false
                 $selectedLibraryPath = Select-BookFromLibrary
                 [Console]::Write("$script:Escape[?25l")
@@ -2972,6 +3106,10 @@ try {
                         $initialPositionApplied = $false
                         $cachedWidth = 0
                         $wrappedLines = @()
+                        $displayRows = @()
+                        $lineRows = @()
+                        $displayLayoutWidth = 0
+                        $displayLayoutSpacing = ''
                         $chapters = @()
                         $searchQuery = ''
                         $searchMatches = @()
@@ -2987,7 +3125,8 @@ try {
             }
             'O' {
                 $renderMode = 'Full'
-                Save-BookProgress -Book $book -LineIndex ($page * $pageSize) -Width $textWidth -TotalLines $wrappedLines.Count -ReaderLineCount $pageSize
+                $progressLine = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
+                Save-BookProgress -Book $book -LineIndex $progressLine -Width $textWidth -TotalLines $wrappedLines.Count -ReaderLineCount $pageSize
                 $progressDirty = $false
                 $newPath = Request-NewPath
                 if (-not [string]::IsNullOrWhiteSpace($newPath)) {
@@ -3006,6 +3145,10 @@ try {
                         $initialPositionApplied = $false
                         $cachedWidth = 0
                         $wrappedLines = @()
+                        $displayRows = @()
+                        $lineRows = @()
+                        $displayLayoutWidth = 0
+                        $displayLayoutSpacing = ''
                         $chapters = @()
                         $searchQuery = ''
                         $searchMatches = @()
@@ -3024,7 +3167,8 @@ try {
         }
 
         if ($wrappedLines.Count -gt 0) {
-            $progressSignature = "$($book.Id)|$page|$pageSize|$textWidth"
+            $signatureLine = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
+            $progressSignature = "$($book.Id)|$signatureLine|$pageSize|$textWidth"
             if (-not [string]::Equals($progressSignature, $lastProgressSignature, [StringComparison]::Ordinal)) {
                 $lastProgressSignature = $progressSignature
                 $progressDirty = $true
@@ -3035,7 +3179,8 @@ try {
 }
 finally {
     if ($wrappedLines.Count -gt 0) {
-        Save-BookProgress -Book $book -LineIndex ($page * $pageSize) -Width $textWidth -TotalLines $wrappedLines.Count -ReaderLineCount $pageSize
+        $progressLine = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
+        Save-BookProgress -Book $book -LineIndex $progressLine -Width $textWidth -TotalLines $wrappedLines.Count -ReaderLineCount $pageSize
     }
     [Console]::Title = $originalTitle
     [Console]::Write("$script:Escape[?25h$script:Escape[?1049l$($script:Ansi.Reset)")
