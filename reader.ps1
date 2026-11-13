@@ -38,6 +38,10 @@ param(
     [ValidateSet('Auto', 'Compact', 'Paragraph', 'Relaxed')]
     [string]$SpacingMode = 'Auto',
 
+    [Alias('TextWidth')]
+    [ValidateSet(0, 72, 88, 104)]
+    [int]$MaxTextWidth = 0,
+
     [switch]$Preview
 )
 
@@ -48,6 +52,7 @@ $script:Escape = [char]27
 $script:Ansi = @{}
 $script:ActiveColorMode = 'Dark'
 $script:ActiveSpacingMode = 'Paragraph'
+$script:ActiveTextWidth = 88
 
 function Set-ReaderColorMode {
     param([Parameter(Mandatory)][ValidateSet('Dark', 'Light')][string]$Mode)
@@ -157,6 +162,23 @@ if ($SpacingMode -eq 'Auto' -and (Test-Path -LiteralPath $script:SettingsPath -P
     catch { }
 }
 $script:ActiveSpacingMode = $initialSpacingMode
+
+$initialTextWidth = 88
+if ($PSBoundParameters.ContainsKey('MaxTextWidth')) {
+    $initialTextWidth = $MaxTextWidth
+}
+elseif (Test-Path -LiteralPath $script:SettingsPath -PathType Leaf) {
+    try {
+        $savedSettings = Get-Content -LiteralPath $script:SettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $savedWidthProperty = $savedSettings.PSObject.Properties['TextWidth']
+        if ($null -ne $savedWidthProperty) {
+            $savedWidth = [int]$savedWidthProperty.Value
+            if ($savedWidth -in @(0, 72, 88, 104)) { $initialTextWidth = $savedWidth }
+        }
+    }
+    catch { }
+}
+$script:ActiveTextWidth = $initialTextWidth
 
 if ([string]::IsNullOrWhiteSpace($BookmarkFile)) {
     $bookmarkBase = [Environment]::GetFolderPath('LocalApplicationData')
@@ -377,6 +399,7 @@ function Get-ReaderShortcutRows {
         @{ Key = 'R'; Label = 'refresh' },
         @{ Key = 'T'; Label = 'theme' },
         @{ Key = 'I'; Label = 'spacing' },
+        @{ Key = 'Z'; Label = 'width' },
         @{ Key = '+/-'; Label = 'lines' },
         @{ Key = 'Home/End'; Label = 'book' },
         @{ Key = 'L'; Label = 'shelf' },
@@ -1799,7 +1822,7 @@ function Get-SavedCodexSessionId {
 
 function Save-ReaderSetting {
     param(
-        [Parameter(Mandatory)][ValidateSet('CodexSessionId', 'ColorMode', 'SpacingMode')][string]$Name,
+        [Parameter(Mandatory)][ValidateSet('CodexSessionId', 'ColorMode', 'SpacingMode', 'TextWidth')][string]$Name,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Value
     )
     try {
@@ -1844,6 +1867,11 @@ function Save-ColorMode {
 function Save-SpacingMode {
     param([Parameter(Mandatory)][ValidateSet('Compact', 'Paragraph', 'Relaxed')][string]$Mode)
     return (Save-ReaderSetting -Name SpacingMode -Value $Mode)
+}
+
+function Save-TextWidth {
+    param([Parameter(Mandatory)][ValidateSet(0, 72, 88, 104)][int]$Width)
+    return (Save-ReaderSetting -Name TextWidth -Value ([string]$Width))
 }
 
 function Resolve-CodexSessionPath {
@@ -2669,7 +2697,8 @@ function Show-ReaderScreen {
     $activeWorkView = @('ACTIVITY', 'GIT', 'PROCESS', 'LOG', 'CODEX')[[int]($WorkProfileIndex % 5)]
     $searchStatus = if ($SearchCount -gt 0) { " | FIND $($SearchIndex + 1)/$SearchCount" } else { '' }
     $spacingStatus = switch ($SpacingMode) { 'Compact' { 'COMPACT' }; 'Paragraph' { 'PARA' }; default { 'RELAXED' } }
-    $status = " $($Book.Encoding) | $mode | SPC $spacingStatus | $activeWorkView$searchStatus "
+    $widthStatus = if ($script:ActiveTextWidth -eq 0) { 'AUTO' } else { [string]$script:ActiveTextWidth }
+    $status = " $($Book.Encoding) | $mode | COL $widthStatus | SPC $spacingStatus | $activeWorkView$searchStatus "
     $footerDivider = [string]::new([char]0x2500, [Math]::Max(10, $Width - 1))
     [void]$buffer.Append("$($script:Ansi.Dim)$footerDivider$($script:Ansi.Reset)`r`n")
     [void]$buffer.Append("$($script:Ansi.Gray)$status$($script:Ansi.Reset)`r`n")
@@ -2722,7 +2751,8 @@ function Show-ReaderRegion {
     $activeWorkView = @('ACTIVITY', 'GIT', 'PROCESS', 'LOG', 'CODEX')[[int]($WorkProfileIndex % 5)]
     $searchStatus = if ($SearchCount -gt 0) { " | FIND $($SearchIndex + 1)/$SearchCount" } else { '' }
     $spacingStatus = switch ($SpacingMode) { 'Compact' { 'COMPACT' }; 'Paragraph' { 'PARA' }; default { 'RELAXED' } }
-    $status = " $($Book.Encoding) | PAGE $($Page + 1)/$pageCount | SPC $spacingStatus | $activeWorkView$searchStatus "
+    $widthStatus = if ($script:ActiveTextWidth -eq 0) { 'AUTO' } else { [string]$script:ActiveTextWidth }
+    $status = " $($Book.Encoding) | PAGE $($Page + 1)/$pageCount | COL $widthStatus | SPC $spacingStatus | $activeWorkView$searchStatus "
     $statusRow = $firstBodyRow + $PageSize + 1
     [void]$buffer.Append("$script:Escape[$statusRow;1H$script:Escape[2K$($script:Ansi.Gray)$status$($script:Ansi.Reset)")
     [Console]::Write($buffer.ToString())
@@ -2807,7 +2837,13 @@ try {
         $readerRows = [Math]::Min($maximumReaderRows, [Math]::Max(5, $activeReaderLines + 2))
         $workRows = [Math]::Max(8, $contentHeight - $readerRows - 2)
         $pageSize = [Math]::Max(3, $readerRows - 2)
-        $textWidth = [Math]::Max(30, $size.Width - 4)
+        $availableTextWidth = [Math]::Max(30, $size.Width - 4)
+        $textWidth = if ($script:ActiveTextWidth -gt 0) {
+            [Math]::Min($availableTextWidth, $script:ActiveTextWidth)
+        }
+        else {
+            $availableTextWidth
+        }
 
         $layoutProgress = -1.0
         $layoutChanged = $initialPositionApplied -and $wrappedLines.Count -gt 0 -and $displayRows.Count -gt 0 -and $lastPageSize -gt 0 -and
@@ -3049,6 +3085,21 @@ try {
                 $displayLayoutSpacing = ''
                 if (-not (Save-SpacingMode -Mode $nextSpacingMode)) {
                     [Console]::WriteLine("$($script:Ansi.Yellow)Spacing changed, but the saved setting could not be written.$($script:Ansi.Reset)")
+                    Start-Sleep -Milliseconds 900
+                }
+                $renderMode = 'Full'
+            }
+            'Z' {
+                $pendingLineIndex = Get-PageSourceLine -DisplayRows $displayRows -Page $page -PageSize $pageSize
+                $nextTextWidth = switch ($script:ActiveTextWidth) {
+                    72 { 88 }
+                    88 { 104 }
+                    104 { 0 }
+                    default { 72 }
+                }
+                $script:ActiveTextWidth = $nextTextWidth
+                if (-not (Save-TextWidth -Width $nextTextWidth)) {
+                    [Console]::WriteLine("$($script:Ansi.Yellow)Text width changed, but the saved setting could not be written.$($script:Ansi.Reset)")
                     Start-Sleep -Milliseconds 900
                 }
                 $renderMode = 'Full'
